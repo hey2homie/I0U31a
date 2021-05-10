@@ -5,7 +5,7 @@ course.
 
 ### Description of the dataset
 
-The dataset contains the expression levels of 71 proteins measured in the cerebral cortex of 8 classes of 
+The dataset contains the expression levels of 70 proteins measured in the cerebral cortex of 8 classes of 
 control and Down syndrome mice exposed to context fear conditioning, a task used to assess associative 
 learning. The eight classes of mice are described based on genotype (control or trisomic), behavioral assay
 (stimulated to learn (context-shock) or not (shock-context)) and treatment (saline or drug Memantine). The 
