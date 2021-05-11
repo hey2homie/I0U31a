@@ -9,9 +9,13 @@ library(caret)		# Dataset partition
 library(corrplot)	# Correlation plot
 library(tree)		# Decision Trees
 library(gbm)		# Gradient Boosting
+library(dismo)		# Cross-Validation of number of trees
+
+options(warn = 0)
 
 # Loading provided dataset
 load("./cortex.rdata")
+cortex$Behavior <- ifelse(cortex$Behavior == "C/S", 1, 0)
 
 # Setting seed for reproduction
 set.seed(10)
@@ -77,14 +81,16 @@ cor.plot <- cortex[1:70] %>%
 # Splitting initial dataset into training and test data
 training.samples <- cortex$Behavior %>%
   createDataPartition(p = 0.7, list = FALSE)
-train.data  <- cortex[1 : 70] %>%
+train.data  <- cortex %>%
+	{ subset(., select = -c(71, 72)) } %>%
 	{.[training.samples, ]}
-test.data <- cortex[1 : 70] %>%
+test.data <- cortex %>%
+	{ subset(., select = -c(71, 72)) } %>%
 	{.[-training.samples, ]}
 
 # Making matrix of predictors and converting factor variable into numerical one
-predictors.train <- model.matrix(cortex[training.samples, ]$Behavior ~ ., train.data)[, -1]
-responce.train <- ifelse(cortex[training.samples, ]$Behavior == "C/S", 1, 0)
+predictors.train <- model.matrix(Behavior ~., train.data)
+responce.train <- train.data$Behavior
 
 # Choosing appropriate value of lambda by 10 fold cross-validation and type measure deviance, which properly suites
 # logistric regressions
@@ -100,13 +106,13 @@ make.model <- function(alpha, lambda.min, predictors = predictors.train, responc
 				  alpha = alpha, family = "binomial", lambda = lambda.min))
 }
 
-# Testing model accuracy
-test.model <- function(model, test = test.data, dataset = cortex) {
+# Testing model accuracy with type "response" since it's logistic regression
+test.model <- function(model, test = test.data) {
 	return(
 		model %>%
-		predict(newx = model.matrix(dataset[-training.samples, ]$Behavior ~., test)[, -1])  %>%
-		{ifelse(. > 0.5, "C/S", "S/C")} %>%
-		{mean(. == dataset[-training.samples, ]$Behavior)}
+		{ predict(., newx = model.matrix(Behavior ~., test), type = "response") }  %>%
+		{ ifelse(. > 0.5, 1, 0) } %>%
+		{ mean(. == test$Behavior) }
 	)
 }
 
@@ -131,7 +137,7 @@ cat("Predictors used in Ridge regression: ", length(summary(coef(ridge.lamba, ri
 	sep = "")
 
 # Printing proteins that are used in making prediction in Lasso regression
-used.proteins <- colnames(cortex)[summary(coef(lasso.lamba, lasso.lamba$lambda.min))$i] %>%
+lasso.usedProteins <- colnames(cortex)[summary(coef(lasso.lamba, lasso.lamba$lambda.min))$i] %>%
 	{ .[seq_along(.) - 1] } %>%
 	print()
 
@@ -139,12 +145,13 @@ findCorrelation(cor.plot, cutoff = 0.8) %>%
 	sort() %>%
 	{ which(. == summary(coef(lasso.lamba, lasso.lamba$lambda.min))$i) } %>%
 	{ colnames(cortex)[.] }
+
 findCorrelation(cor.plot, cutoff = 0.8) %>%
 	{ print(length(.)) }
 
 # ----------------------------------------------------------------------------------------------------------------------
 # 1 — Since in Lasso regression we are also performing variable selection in addition to shrinkige, and after running
-# the model we can see that it has only 9 variables in it of which one is highly correlated (correlation > 0.8). The
+# the model we can see that it has only 13 variables in it of which one is highly correlated (correlation > 0.8). The
 # whole dataset include 27 highly correlated variables which are also included in Ridge regression. This can result in
 # multicollinearity which, in turn, affects model coefficients, hence, prediction power.
 # ----------------------------------------------------------------------------------------------------------------------
@@ -172,8 +179,8 @@ cat("Ridge regression accuracy: ", ridge.accuracy, "\n",
 
 # ----------------------------------------------------------------------------------------------------------------------
 # 3 — As we previously saw, model in which Ridge regression is used uses all available predictors (plus intercept).
-# Lasso regression, on the other hand, uses only 9 of them (plus intercept). Reduced set of predictors resulted in
-# improving accuracy by 0.25. Hence, we can conclude that Lasso works better. However, since lambda used in Lasso
+# Lasso regression, on the other hand, uses only 13 of them (plus intercept). Reduced set of predictors resulted in
+# improving accuracy by 0.095. Hence, we can conclude that Lasso works better. However, since lambda used in Lasso
 # regression approaches zero, we can say that it acts like OLS regression and penalty doesn't effect selection and
 # shrinkage.
 # ----------------------------------------------------------------------------------------------------------------------
@@ -184,41 +191,46 @@ cat("Ridge regression accuracy: ", ridge.accuracy, "\n",
 # variables?
 # ----------------------------------------------------------------------------------------------------------------------
 
-# Making tree model
-tree.accuracy <- tree(cortex[training.samples, ]$Behavior ~., train.data) %>%
-	{ predict(., cortex[-training.samples, ], type="class") } %>%
-	{ mean(. == cortex[-training.samples, ]$Behavior) } %>%
-	print()
-
-# Building boost model
-values.toPredict <- ifelse(cortex[training.samples, ]$Behavior == "C/S", 1, 0)
-boost.model <- gbm(values.toPredict ~., train.data, distribution = "bernoulli", n.trees = 10000,
-				   shrinkage = 0.01, interaction.depth = 4)
-boost.prediction <- predict(boost.model, newdata = test.data, n.trees = seq(from = 100, to = 10000, by = 100),
+# Building boost model using bernoulli distribution as family parameter since the output is binary. First, running
+# cross-validation to determine the amount of trees that we'll use in model making
+boost.bestNumber <- gbm.step(train.data, gbm.x = 1:70, gbm.y = 71, family = "bernoulli", tree.complexity = 5,
+					 learning.rate = 0.005, bag.fraction = 0.5, n.folds = 10) %>%
+	gbm.perf()
+boost.model <- gbm(train.data$Behavior ~., train.data, distribution = "bernoulli", n.trees = boost.bestNumber,
+				   shrinkage = 0.01, interaction.depth = 4, cv.folds = 10)
+boost.prediction <- predict(boost.model, newdata = test.data, n.trees = boost.bestNumber,
 							type = "response")
+boost.accuracy <- ifelse(boost.prediction > 0.5, 1, 0) %>%
+	{ mean(. == test.data$Behavior) }
 
-boost.accuracy <-
-	ifelse(boost.prediction > 0.5, "C/S", "S/C") %>%
-	{ mean(. == cortex[-training.samples, ]$Behavior) }
-
-# Comparing accuracy of tree model with gradient boosted decision tree model
-cat("Accuracy of the tree model: ", tree.accuracy, "\n",
-    "Accuracy of the gradient boosted decision tree model: ", boost.accuracy,
+cat("Accuracy of the gradient boosted decision tree model: ", boost.accuracy, "\n",
 	sep = "")
 
-# List of influential proteins used in Boost model
-boost.proteins <- summary(boost.model)$rel.inf %>%
+# ----------------------------------------------------------------------------------------------------------------------
+# We see that the prediction power of Gradient Boost Decesion Tree is the same as in the Lasso regression (1).
+# ----------------------------------------------------------------------------------------------------------------------
+
+# Vector of influential proteins used in Boost model
+boost.usedProteins <- summary(boost.model)$rel.inf %>%
 	{ which(. > 1) } %>%
 	{ row.names(summary(boost.model))[.]}
+print(length(boost.usedProteins))
+
+# Vector of predictors that don't contribute to the model
+boost.unusedProtein <- summary(boost.model)$rel.inf %>%
+	{ which(. == 0) } %>%
+	{ row.names(summary(boost.model))[.]}
+print(length(boost.unusedProtein))
 
 # Find common proteins used in both models
-intersect(boost.proteins, used.proteins)
+intersect(boost.usedProteins, lasso.usedProteins)
 
-# Some plots
-par(mfrow = c(1, 2))
-plot(boost.model, i = "pERK_N")
-plot(boost.model, i = "ITSN1_N")
-plot(boost.model, i = "SNCA_N")
+# ----------------------------------------------------------------------------------------------------------------------
+# In the Boost model there are 12 higly influential parameters (> 1) and 27 that don't contribute to the model (0). Of
+# 12 proteins in the Boost model only 3 (pERK_N, DYRK1A_N, nNOS_N) are used in the Lasso regression model. This can be
+# an evidance towards non-linear relationships or possible interactions between predictors in the dataset.
+# ----------------------------------------------------------------------------------------------------------------------
+
 # ----------------------------------------------------------------------------------------------------------------------
 # Does Memantine injection influence protein values when controlling for genotype and treatment?
 # ----------------------------------------------------------------------------------------------------------------------
